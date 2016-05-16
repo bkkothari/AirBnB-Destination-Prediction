@@ -1,0 +1,645 @@
+---
+title: "AirBnB Destination Prediction"
+author: "Sharlene, Sonali, Bhushan"
+date: "Tuesday, March 08, 2016"
+output:
+  ioslides_presentation:
+    logo: airbnb.png
+    smaller: yes
+    widescreen: yes
+  beamer_presentation: default
+  slidy_presentation: default
+---
+
+##AirBnB Booking Prediction on Kaggle
+
+Training data consisting of around 214000 users.
+
+- NaiveBayes
+- Xgboost(Gradient Boosting)
+- Exploratory analysis
+
+##Various Packages Used
+- xgboost
+- lubridate
+- e1071
+- rworldmap
+- reshape
+- sqldf
+
+```{r, echo=FALSE}
+library(xgboost)
+library(sqldf)
+library(reshape)
+library(rpart.plot)
+library(stringr)
+library(caret)
+library(car)
+library(e1071)
+library(sqldf)
+library(dplyr)
+library(MASS)
+library(ggmap)
+library(rworldmap)
+library(ggplot2)
+library(lubridate)
+library(rpart)
+library(caTools)
+library(randomForest)
+set.seed(1)
+```
+
+
+```{r,echo=FALSE}
+setwd("E:/Datasets/Airbnb")
+age_buckets_data=read.csv("age_gender_bkts.csv")
+df_train_Data = read.csv("train_users_2.csv")
+copyofRaw = df_train_Data
+labels = copyofRaw['country_destination']
+countryDetails = read.csv("countries.csv")
+```
+
+##Some Information about Data
+
+```{r}
+names(copyofRaw)
+```
+
+
+##Destination Data
+
+```{r,echo=FALSE}
+countries= table(df_train_Data$country_destination)
+barplot(countries*100/sum(countries), xlab = "Destination", ylab = "Percentage")
+
+
+```
+
+
+##Types of Booking
+
+```{r,echo=FALSE}
+tempDF = df_train_Data
+tempDF = tempDF %>% mutate(country_destination=
+                                ifelse(country_destination== 'AU' |
+                                      country_destination== 'CA'|
+                                      country_destination== 'FR'|
+                                      country_destination== 'GB'|
+                                      country_destination== 'ES'|
+                                        country_destination== 'IT'|
+                                        country_destination== 'PT'|
+                                        country_destination== 'NL'|
+                                        country_destination== 'DE'|
+                                        country_destination== 'other'
+                                        ,'International',
+                                      ifelse(country_destination== 'US',
+                                             'Domestic',
+                                             'No booking')))
+
+international = table(tempDF$country_destination)
+barplot(international*100/sum(international), xlab = "Type of Travel", ylab = "Percentage",col="#FD5C64")
+
+```
+
+
+##Gender Data
+
+```{r,echo=FALSE}
+genders = table(df_train_Data$gender)
+barplot(genders*100/sum(genders), xlab = "Gender", ylab = "Percentage",col="#FD5C64")
+
+```
+
+##Age Data
+```{r,echo=FALSE}
+qplot(x=df_train_Data$age,geom="histogram",
+      binwidth = 10,  
+      main = "Histogram for Age", 
+      xlab = "Age",  
+      fill=I("blue"), 
+      col=I("red"), 
+      alpha=I(.2))
+
+
+
+
+```
+
+
+##Age Data - Post cleanup
+```{r,echo=FALSE}
+dfAge = df_train_Data
+dfAge$age = as.integer(dfAge$age)
+dfAge = dfAge %>% mutate(age = 
+    ifelse(dfAge$age>1920 & dfAge$age<2000,2016-dfAge$age,
+           ifelse(dfAge$age>16 & dfAge$age<96,dfAge$age,NaN))
+  )
+
+qplot(x=dfAge$age,geom="histogram",
+      binwidth = 10,  
+      main = "Histogram for Age", 
+      xlab = "Age",  
+      fill=I("blue"), 
+      col=I("red"), 
+      alpha=I(.2))
+
+```
+
+
+##User accounts and bookings over time
+
+```{r,echo=FALSE}
+series = df_train_Data
+series$date_account_created = as.Date(series$date_account_created)
+series$date_first_booking = as.Date(as.character(series$date_first_booking), format="%Y-%m-%d")
+
+series$week_created = as.Date(cut(series$date_account_created,
+                                     breaks = "week", 
+                                     start.on.monday = FALSE))
+series$week_booked = as.Date(cut(series$date_first_booking,
+                                    breaks = "week", 
+                                    start.on.monday = FALSE))
+
+weekly_booked = group_by(series, date= week_booked) %>%
+    summarise(booking_count = n())
+
+weekly_created = group_by(series, date = week_created) %>%
+    summarise(created_count = n())
+
+weekly_booked = weekly_booked[!is.na(weekly_booked$date),]
+# head(weekly_booked)
+
+
+weekly_stats = merge(weekly_booked, weekly_created, by="date")
+
+weekly_stats = melt(weekly_stats, id.vars = "date")
+
+ggplot(weekly_stats, aes(date, value, col = variable)) +
+    geom_line()
+
+```
+
+##Weekday corresponding to maximum booking
+
+```{r,echo=FALSE}
+dfDay = df_train_Data %>% filter(date_first_booking != '' & country_destination != 'NDF')
+dfDay$date_first_booking = factor(dfDay$date_first_booking)
+
+dfDay$day = weekdays(as.Date(dfDay$date_first_booking))
+
+dfDay$day <- factor(dfDay$day, levels= c("Sunday", "Monday", 
+    "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+count = table(dfDay$day)
+barplot(count, xlab = "Weekday", ylab = "Total Bookings",col="#FD5C64")
+
+
+```
+
+
+##Cleaning Data
+
+- Cleaning up age variables
+- Creating new variables such as ageProvded, difference of days in activity and booking
+- Month of the booking
+- Separating factors into their levels
+
+```{r,echo=FALSE}
+cleanDF = df_train_Data
+cleanDF = cleanDF %>% mutate(ageProvided = ifelse(is.na(age),0,1))
+cleanDF = cleanDF %>% mutate(age = 
+                           ifelse(age>1916 & age<2016,2016-age,
+                                  ifelse(age>16 & age<100,age,NaN))
+)
+cleanDF[is.na(cleanDF)] = -1
+#cleanDF = na.omit(cleanDF)
+# table(cleanDF$age)
+cleanDF = cleanDF %>% mutate(bookingDone = ifelse(cleanDF$country_destination=='NDF'
+                                                  ,0,1))
+
+cleanDF$gender=as.factor(cleanDF$gender)
+cleanDF$age=as.integer(cleanDF$age)
+cleanDF$signup_method=as.factor(cleanDF$signup_method)
+cleanDF$signup_flow=as.factor(cleanDF$signup_flow)
+cleanDF$language=as.factor(cleanDF$language)
+cleanDF$affiliate_provider=as.factor(cleanDF$affiliate_provider)
+cleanDF$first_affiliate_tracked=as.factor(cleanDF$first_affiliate_tracked)
+cleanDF$signup_app=as.factor(cleanDF$signup_app)
+cleanDF$first_device_type=as.factor(cleanDF$first_device_type)
+cleanDF$first_browser=as.factor(cleanDF$first_browser)
+cleanDF$country_destination=as.factor(cleanDF$country_destination)
+cleanDF$bookingDone = as.factor(cleanDF$bookingDone)
+cleanDF$ageProvided = as.factor(cleanDF$ageProvided)
+cleanDF$id=as.factor(cleanDF$id)
+cleanDF$date_account_created=as.factor(cleanDF$date_account_created)
+cleanDF$timestamp_first_active=as.factor(cleanDF$timestamp_first_active)
+cleanDF$date_first_booking=as.factor(cleanDF$date_first_booking)
+
+```
+
+
+##Predicting Successful Booking
+Now we will try to break this problem into small parts. We will now try to predict whether a user books AirBnB or not.
+
+```{r,echo=FALSE}
+dataset = cleanDF
+# for (i in 1:ncol(dataset)) {
+#   #  if (sum(as.numeric(is.na(df_train_Data[, i]))) > 0) {
+#   num_missing = sum(as.numeric(is.na(dataset[, i])))
+#   print(paste0(colnames(dataset)[i], ":  ", num_missing))
+#   
+#   # }
+# }
+
+
+
+set.seed(121)
+splDS = sample.split(dataset$bookingDone, SplitRatio = 0.7)
+trainDS = subset(dataset, splDS==TRUE)
+testDS= subset(dataset, splDS==FALSE)
+
+actualBooking = testDS$bookingDone
+testDS = subset(testDS,select = -c(bookingDone))
+
+modelDS = naiveBayes(trainDS$bookingDone ~ gender+age+signup_method+
+                        language+signup_app+affiliate_channel+affiliate_provider+
+                        first_affiliate_tracked+
+                        first_device_type+first_browser, data = trainDS)
+
+predDS=predict(modelDS, testDS)
+# predDS
+confNBDS = table(predDS, actualBooking)
+confNBDS
+chisq.test(confNBDS)
+```
+
+##Recursive Tree for Booking prediction
+```{r,echo=FALSE}
+Tree = rpart(trainDS$bookingDone ~ gender+age+signup_method+
+               language+signup_app+affiliate_channel+affiliate_provider+
+                 first_affiliate_tracked+ageProvided+
+                 first_device_type+first_browser, data = trainDS, method="class", minbucket=25)
+# # 
+PredictCART = predict(Tree, newdata = testDS, type = "class")
+confRpart = table(PredictCART, actualBooking)
+confRpart
+prp(Tree,type=1,extra=2)
+```
+
+
+##Predicting type of Booking
+
+```{r,echo=FALSE}
+bookedData = dataset%>% filter(bookingDone==1)
+diff = as.Date(as.character(bookedData$date_first_booking), format="%Y-%m-%d")-
+  as.Date(as.character(bookedData$date_account_created), format="%Y-%m-%d")
+
+# table(diff)
+bookedData = bookedData %>% mutate(difference = ifelse(diff> 0 ,diff,-1))
+
+bookedData = bookedData %>% mutate(typeofbooking=
+                                      ifelse(country_destination== 'US'
+                                             ,'Domestic',
+                                             'International'
+                                      ))
+# table(bookedData$typeofbooking)
+# names(bookedData)
+bookedData$date_first_booking = factor(bookedData$date_first_booking)
+
+dfb = as.data.frame(str_split_fixed(bookedData$date_first_booking, '-', 3))
+bookedData['dfb_month'] = as.factor(dfb[,2])
+
+bookedData$typeofbooking = as.factor(bookedData$typeofbooking)
+
+set.seed(121)
+splType = sample.split(bookedData$bookingDone, SplitRatio = 0.7)
+trainType = subset(bookedData, splType==TRUE)
+testType= subset(bookedData, splType==FALSE)
+bookingType = testType$typeofbooking
+testType = subset(testType,select = -c(typeofbooking))
+
+modelType = naiveBayes(typeofbooking ~ gender+age+signup_method+
+                          language+signup_app+affiliate_channel+affiliate_provider+
+                          first_affiliate_tracked+dfb_month+
+                          first_device_type+first_browser+ageProvided+difference+date_first_booking, data = trainType)
+
+predType=predict(modelType, testType)
+confType = table(predType,bookingType)
+
+confType
+chisq.test(confType)
+```
+
+
+
+##Predicting Destination country
+
+NaiveBayes
+```{r,echo=FALSE}
+interBooking = bookedData %>% filter(typeofbooking=='International')
+set.seed(121)
+interBooking$country_destination = factor(interBooking$country_destination)
+
+splCoun = sample.split(interBooking$country_destination, SplitRatio = 0.7)
+trainCoun = subset(interBooking, splCoun==TRUE)
+testCoun= subset(interBooking, splCoun==FALSE)
+
+countries = testCoun$country_destination
+testCoun = subset(testCoun,select = -c(country_destination))
+
+modelCoun = naiveBayes(trainCoun$country_destination ~ ., data = trainCoun)
+predCoun=predict(modelCoun, testCoun)
+confCoun = table(predCoun,countries)
+
+print(confCoun)
+
+```
+
+##Predicting Destination country
+
+```{r,echo=FALSE}
+chisq.test(confCoun)
+sum = 0
+for(i in 1:nrow(confCoun)){
+  sum = sum + confCoun[i,i]
+}
+print(sum/sum(confCoun))
+```
+
+##Predicting Destination country
+Now we sample 500 rows for each destination and check output. 
+
+```{r,echo=FALSE}
+dother=sqldf("select * from interBooking where country_destination=='other' LIMIT 500") 
+dAU=sqldf("select * from interBooking where country_destination=='AU' LIMIT 500") 
+dCA=sqldf("select * from interBooking where country_destination=='CA' LIMIT 500") 
+dDE=sqldf("select * from interBooking where country_destination=='DE' LIMIT 500") 
+dES=sqldf("select * from interBooking where country_destination=='ES' LIMIT 500") 
+dFR=sqldf("select * from interBooking where country_destination=='FR' LIMIT 500") 
+dGB=sqldf("select * from interBooking where country_destination=='GB' LIMIT 500") 
+dIT=sqldf("select * from interBooking where country_destination=='IT' LIMIT 500")
+dNL=sqldf("select * from interBooking where country_destination=='NL' LIMIT 500") 
+dPT=sqldf("select * from interBooking where country_destination=='PT' LIMIT 217") 
+
+dALL=sqldf("select * from dother union select * from dAU union select * from dCA union select * from dDE union select * from dES union select * from dFR union select * from dGB union select * from dIT union select * from dNL union select * from dPT")
+
+splCoun1 = sample.split(dALL$country_destination, SplitRatio = 0.7)
+trainCoun1 = subset(dALL, splCoun1==TRUE)
+testCoun1= subset(dALL, splCoun1==FALSE)
+
+countries = testCoun1$country_destination
+testCoun1 = subset(testCoun1,select = -c(country_destination))
+
+modelCoun1 = naiveBayes(trainCoun1$country_destination ~ ., data = trainCoun1)
+predCoun1=predict(modelCoun1, testCoun1)
+confCoun1 = table(predCoun1,countries)
+
+confCoun1
+
+```
+
+##Predicting Destination country
+```{r,echo=FALSE}
+chisq.test(confCoun1)
+sum = 0
+for(i in 1:nrow(confCoun1)){
+  sum = sum + confCoun1[i,i]
+}
+print(sum/sum(confCoun1))
+
+```
+
+
+##Gradient Boosting
+- eXtreme Gradient Boosing
+- Produces a prediction model in the form of an ensemble of weak prediction models
+- **Bagging**: Build models on random samples of data
+- **Boosting**: More weight given to samples which are hard to classify rather than sample
+
+xgb = xgboost(**data** = data.matrix(train_X), 
+               **label** = train_Y, 
+               **eta** = 0.1,
+               **max_depth** = 9, 
+               **nround**=25, 
+               **subsample** = 0.5,
+               **colsample_bytree** = 0.5,
+               **seed** = 1,
+               **eval_metric** = "merror",
+               **objective** = "multi:softprob",
+               **num_class** = 12,
+               **nthread** = 3
+)
+
+##Important Parameters
+- **Objective**: Type of model that needs to be trained. In our case we have used multi:softprob to do multi -class classification
+- Output contains predicted probability of each data point belonging to each class
+- **Depth**: Maximum Depth of trees(Default=6)
+- **nround**: Number of passes on the data
+- **nthread**: Number of cpu threads being used
+- **eta**: Shrinks the feature weights after boosting to avoid overfitting
+- **subsample**: Subsample Ratio to training instances
+
+##Predicting Destination country
+
+```{r,echo=FALSE}
+dfXGB = cleanDF#rbind(df_train22,df_test22)
+
+# split date_account_created in year, month and day
+dac = as.data.frame(str_split_fixed(dfXGB$date_account_created, '-', 3))
+dfXGB['dac_year'] = dac[,1]
+dfXGB['dac_month'] = dac[,2]
+dfXGB['dac_day'] = dac[,3]
+dfXGB = dfXGB[,-c(which(colnames(dfXGB) %in% c('date_account_created')))]
+
+# split timestamp_first_active in year, month and day
+dfXGB['tfa_year'] = as.factor(substring(as.character(dfXGB[,'timestamp_first_active']), 1, 4))
+dfXGB['tfa_month'] = as.factor(substring(as.character(dfXGB['timestamp_first_active']), 5, 6))
+dfXGB['tfa_day'] = as.factor(substring(as.character(dfXGB['timestamp_first_active']), 7, 8))
+dfXGB = dfXGB[,-c(which(colnames(dfXGB) %in% c('timestamp_first_active')))]
+
+# We split the factor variables in multiple columns and then run the xgboost
+features = c('gender', 'signup_method', 'signup_flow', 'language', 'affiliate_channel', 'affiliate_provider', 'first_affiliate_tracked', 'signup_app', 'first_device_type', 'first_browser')
+dummies = dummyVars(~ gender + signup_method + signup_flow + language + affiliate_channel + affiliate_provider + first_affiliate_tracked + signup_app + first_device_type + first_browser, data = dfXGB)
+dfXGB_ohe = as.data.frame(predict(dummies, newdata = dfXGB))
+
+dfXGB_combined = cbind(dfXGB[,-c(which(colnames(dfXGB) %in% features))],dfXGB_ohe)
+
+set.seed(121)
+spl = sample.split(dfXGB_combined$country_destination, SplitRatio = 0.7)
+train_sample = subset(dfXGB_combined, spl==TRUE)
+test_sample = subset(dfXGB_combined, spl==FALSE)
+
+train_X = train_sample[,c(1:3,5:144)]
+train_Y = train_sample["country_destination"]
+
+#train22_X["country_destination"]
+
+test_X = test_sample[,c(1:3,5:144)] 
+test_Y = test_sample["country_destination"]
+ADest = test_Y
+
+# str(ADest)
+# str(test_sample)
+
+train_Y = recode(train_Y$country_destination,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+train_Y = as.numeric(levels(train_Y))[train_Y]
+
+test_Y = recode(test_Y$country_destination,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+test_Y = as.numeric(levels(test_Y))[test_Y]
+
+X_test = test_X
+
+xgb = xgboost(data = data.matrix(train_X), 
+               label = train_Y, 
+               eta = 0.1,
+               max_depth = 9, 
+               nround=25, 
+               subsample = 0.5,
+               colsample_bytree = 0.5,
+               seed = 1,
+               eval_metric = "merror",
+               objective = "multi:softprob",
+               num_class = 12,
+               nthread = 3
+)
+
+y_pred = predict(xgb, data.matrix(X_test))
+
+predictions = as.data.frame(matrix(y_pred, nrow=12))
+rownames(predictions) = c('NDF','US','other','FR','CA','GB','ES','IT','PT','NL','DE','AU')
+# topPredictions_3 = as.data.frame(apply(predictions, 2, function(x) names(sort(x)[12:10])))
+
+
+topPredictions_3_F = as.vector(apply(predictions, 2, function(x) names(sort(x)[12:10])))
+
+ids = NULL
+actualDest = NULL
+for (i in 1:NROW(X_test)) {
+  idx = X_test$id[i]
+  ids = append(ids, rep(idx,3))
+}
+
+Predict = NULL
+Predict$id = ids
+Predict$P_country = topPredictions_3_F
+
+Predict = as.data.frame(Predict)
+
+top1 = as.vector(apply(predictions, 2, function(x) names(sort(x)[12])))
+
+top1 = recode(top1,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+#top1 = as.numeric(levels(top1))[top1]
+length(top1)
+
+```
+
+##Prediction Format
+```{r,echo=FALSE}
+head(Predict)
+t = table(top1,test_Y)
+t
+print((t[1,1]+t[2,2])/sum(t))
+```
+
+##Does Signup_App have a relationship with Destination?
+```{r,echo=FALSE}
+t = table(df_train_Data$signup_app, df_train_Data$country_destination) 
+df_App = as.data.frame(t)
+names(df_App) = c("signup_app", "destination_country", "Count")
+ggplot(df_App, aes(signup_app, Count, fill=destination_country)) + geom_bar(stat="identity")
+```
+
+
+##Does Signup_App have a relationship with Destination?
+```{r,echo=FALSE}
+t = table(df_train_Data$signup_app, df_train_Data$country_destination) 
+df_App = as.data.frame(t / rowSums(t))
+names(df_App) = c("signup_app", "destination_country", "Ratio")
+ggplot(df_App, aes(signup_app, Ratio, fill=destination_country)) + geom_bar(stat="identity")
+
+```
+
+##What effect does Language have upon Destination Country?
+```{r,echo=FALSE}
+t = table(df_train_Data$language, df_train_Data$country_destination) 
+df_Lang = as.data.frame(t / rowSums(t))
+names(df_Lang) = c("Language", "destination_country", "Ratio")
+ggplot(df_Lang, aes(Language, Ratio, fill=destination_country)) + geom_bar(stat="identity")
+```
+
+##What effect does Signup_method have upon Destination Country?
+```{r,echo=FALSE}
+t = table(df_train_Data$signup_method, df_train_Data$country_destination) 
+df_Method = as.data.frame(t)
+names(df_Method) = c("Signup_Method", "destination_country", "Ratio")
+ggplot(df_Method, aes(Signup_Method, Ratio, fill=destination_country)) + geom_bar(stat="identity")
+```
+
+##What effect does Signup_method have upon Destination Country?
+```{r,echo=FALSE}
+t = table(df_train_Data$signup_method, df_train_Data$country_destination) 
+df_Method = as.data.frame(t / rowSums(t))
+names(df_Method) = c("Signup_Method", "destination_country", "Ratio")
+ggplot(df_Method, aes(Signup_Method, Ratio, fill=destination_country)) + geom_bar(stat="identity")
+```
+
+##Future scope for AirBnB
+```{r,echo=FALSE}
+# newmap <- get_map()
+# 
+# plot(newmap)
+# points(countryDetails$lng_destination,countryDetails$lat_destination, col = "red")
+
+countryCount = df_train_Data %>% group_by(country_destination) %>% summarise(count = n())
+countryCount = subset(countryCount , country_destination!='NDF')
+countryCount = subset(countryCount , country_destination!='other')
+
+finalCountry = merge(countryDetails, countryCount, by = 'country_destination')
+
+mp <- NULL
+mapWorld <- borders("world", colour="gray50", fill="gray50") # create a layer of borders
+mp <- ggplot() +   mapWorld
+
+#Now Layer the cities on top
+mp <- mp+ geom_point(data = finalCountry, aes(x = lng_destination, y = lat_destination, size=count), color="red") 
+mp
+```
+
+##What could be done better?
+- Feature engineering 
+- Lots of scope for improving accuracy of NaiveBayes
+- Implementing other prediction algorithms
+
+```{r,echo=FALSE}
+#Attemp to count number of predictions correct in top3
+# top3 = t(topPredictions_3)
+# head(top3)
+# 
+# top3 = as.data.frame(top3)
+# colnames(top3) = c("P1","P2","P3")
+# 
+# top3$P1 = recode(top3$P1,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+# top3$P2 = recode(top3$P2,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+# top3$P3 = recode(top3$P3,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11")
+# 
+# top3$P1 = as.numeric(levels(top3$P1))[top3$P1]
+# top3$P2 = as.numeric(levels(top3$P2))[top3$P2]
+# top3$P3 = as.numeric(levels(top3$P3))[top3$P3]
+# top3$count = 0
+# head(top3)
+# 
+# correct_Classified = 0
+# check = function(D, e) {
+#   for(i in 1:nrow(D)){
+#     for(j in 1:ncol(D)-1){
+#       
+#     if(e[i] %in% D[i,j]) {
+#         D[i]$count = 1
+#     }
+#   }
+# }
+# }
+# correct = check(top3,test_Y)
+
+
+```
+
